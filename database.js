@@ -51,6 +51,7 @@ function initTables() {
       file_size INTEGER,
       encrypted_path TEXT NOT NULL,
       mime_type TEXT,
+      description TEXT,
       uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (vault_id) REFERENCES vaults(id)
     )

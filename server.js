@@ -163,10 +163,12 @@ app.post('/api/vaults/:vaultId/upload', verifyToken, upload.single('file'), asyn
 
         // Save file metadata
         const fileId = uuidv4();
+        const description = req.body.description || null;
+
         db.run(
-          `INSERT INTO files (id, vault_id, file_name, file_type, file_size, encrypted_path, mime_type)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          [fileId, vaultId, file.originalname, path.extname(file.originalname), file.size, encryptedPath, file.mimetype],
+          `INSERT INTO files (id, vault_id, file_name, file_type, file_size, encrypted_path, mime_type, description)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [fileId, vaultId, file.originalname, path.extname(file.originalname), file.size, encryptedPath, file.mimetype, description],
           function(err) {
             if (err) {
               res.status(500).json({ success: false, error: err.message });
@@ -177,7 +179,8 @@ app.post('/api/vaults/:vaultId/upload', verifyToken, upload.single('file'), asyn
                   fileId,
                   fileName: file.originalname,
                   fileSize: file.size,
-                  mimeType: file.mimetype
+                  mimeType: file.mimetype,
+                  description
                 }
               });
             }
@@ -228,11 +231,14 @@ app.get('/api/files/:fileId', verifyToken, (req, res) => {
 // Create time-locked message
 app.post('/api/vaults/:vaultId/time-lock', verifyToken, (req, res) => {
   const { vaultId } = req.params;
-  const { contentType, content, unlockDate, recipientEmail } = req.body;
+  const { title, content, unlockDate, recipientEmail } = req.body;
 
   // Encrypt content
   const encryptedContent = encryptText(content);
   const lockId = uuidv4();
+
+  // Use title as content_type for backward compatibility
+  const contentType = title || 'Message';
 
   db.run(
     `INSERT INTO time_locked_content (id, vault_id, content_type, encrypted_content, unlock_date, recipient_email)
@@ -244,9 +250,93 @@ app.post('/api/vaults/:vaultId/time-lock', verifyToken, (req, res) => {
       } else {
         res.json({
           success: true,
-          data: { lockId, unlockDate, recipientEmail }
+          data: { lockId, title: contentType, unlockDate, recipientEmail }
         });
       }
+    }
+  );
+});
+
+// Get files for a specific vault
+app.get('/api/vaults/:vaultId/files', verifyToken, (req, res) => {
+  const { vaultId } = req.params;
+
+  // Verify vault ownership
+  db.get(
+    'SELECT * FROM vaults WHERE id = ? AND user_id = ?',
+    [vaultId, req.user.userId],
+    (err, vault) => {
+      if (err || !vault) {
+        return res.status(403).json({ success: false, error: 'Vault not found or access denied' });
+      }
+
+      // Get files
+      db.all(
+        'SELECT id, file_name, file_type, file_size, mime_type, uploaded_at, description FROM files WHERE vault_id = ? ORDER BY uploaded_at DESC',
+        [vaultId],
+        (err, files) => {
+          if (err) {
+            res.status(500).json({ success: false, error: err.message });
+          } else {
+            res.json({ success: true, data: files || [] });
+          }
+        }
+      );
+    }
+  );
+});
+
+// Get time-locked messages for a specific vault
+app.get('/api/vaults/:vaultId/time-locked', verifyToken, (req, res) => {
+  const { vaultId } = req.params;
+
+  // Verify vault ownership
+  db.get(
+    'SELECT * FROM vaults WHERE id = ? AND user_id = ?',
+    [vaultId, req.user.userId],
+    (err, vault) => {
+      if (err || !vault) {
+        return res.status(403).json({ success: false, error: 'Vault not found or access denied' });
+      }
+
+      // Get time-locked messages
+      db.all(
+        'SELECT id, content_type, encrypted_content, unlock_date, recipient_email, is_delivered, created_at FROM time_locked_content WHERE vault_id = ? ORDER BY unlock_date ASC',
+        [vaultId],
+        (err, messages) => {
+          if (err) {
+            res.status(500).json({ success: false, error: err.message });
+          } else {
+            // Decrypt messages that are unlocked
+            const now = new Date();
+            const processedMessages = messages.map(msg => {
+              const unlockDate = new Date(msg.unlock_date);
+              if (now >= unlockDate) {
+                // Message is unlocked - decrypt it
+                return {
+                  id: msg.id,
+                  title: msg.content_type || 'Message',
+                  content: decryptText(msg.encrypted_content),
+                  unlock_date: msg.unlock_date,
+                  is_unlocked: true,
+                  created_at: msg.created_at
+                };
+              } else {
+                // Message is still locked
+                return {
+                  id: msg.id,
+                  title: msg.content_type || 'Message',
+                  content: null,
+                  unlock_date: msg.unlock_date,
+                  is_unlocked: false,
+                  created_at: msg.created_at
+                };
+              }
+            });
+            res.json({ success: true, data: processedMessages });
+          }
+        }
+      );
     }
   );
 });
